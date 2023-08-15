@@ -10,6 +10,7 @@ import numpy as np
 import models
 import dataset
 import utils
+import metrics
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -17,7 +18,13 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 def train(args, model, dataloaders):
     optimizer = torch.optim.Adagrad(model.parameters(), lr=args.lr)
-    lossFn = nn.CrossEntropyLoss()
+    lossFns = {
+        'bowel': nn.NLLLoss(weight=[1, 2]),
+        'extravasation': nn.NLLLoss(weight=[1, 6]),
+        'liver': nn.NLLLoss(weight=[1, 2, 4]),
+        'kidney': nn.NLLLoss(weight=[1, 2, 4]),
+        'spleen': nn.NLLLoss(weight=[1, 2, 4])
+    }
     bestTrainLoss = float('inf')
     bestValLoss = float('inf')
     earlyStopCount = 0
@@ -31,12 +38,10 @@ def train(args, model, dataloaders):
             imgs, targets = data[0].to(device), data[1].to(device)
             optimizer.zero_grad()
             preds = model(imgs)
-            bowelLoss = lossFn(preds[0], targets[:, 0].to(device))
-            extravLoss = lossFn(preds[1], targets[:, 1].to(device))
-            kidneyLoss = lossFn(preds[2], targets[:, 2].to(device))
-            liverLoss = lossFn(preds[3], targets[:, 3].to(device))
-            spleenLoss = lossFn(preds[4], targets[:, 4].to(device))
-            loss = bowelLoss + extravLoss + kidneyLoss + liverLoss + spleenLoss
+            losses = {}
+            for i, organ in enumerate(lossFns.keys()):
+                losses[organ] = lossFns[organ](preds[i], targets[:, i].to(device))
+            loss = torch.sum(losses.values())
             loss.backward()
             optimizer.step()
             
@@ -52,7 +57,7 @@ def train(args, model, dataloaders):
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'loss': loss,
+                'loss': totalTrainLoss,
                 }, os.path.join(args.o, 'checkpoints', 'best_train.pt'))
 
         # Training checkpoint
@@ -61,34 +66,37 @@ def train(args, model, dataloaders):
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'loss': loss,
+                'loss': totalTrainLoss,
                 }, os.path.join(args.o, 'checkpoints', 'latest.pt'))
 
         logger.info(f"[{epoch + 1}] Epoch {epoch+1} | Train loss: {totalTrainLoss / len(dataloaders['train'].dataset):.5f} | Time: {(time.time()-t):.1f} s")
 
-        if args.val and (epoch+1)%args.val_freq==0:
+        if args.val_idx and (epoch+1)%args.val_freq==0:
             t = time.time()
             model.eval()
-            total_val_loss = 0.0
+            totalValLoss = 0.0
             with torch.no_grad():
                 for i, data in enumerate(dataloaders['val']):
-                    imgs = data[0].to(device)
-                    targets = torch.squeeze(data[1].to(device).long())
-                    preds = model(imgs)['out']
-                    total_val_loss += lossFn(preds, targets).item()
+                    imgs, targets = data[0].to(device), data[1].to(device)
+                    preds = model(imgs)
+                    losses = {}
+                    for i, organ in enumerate(lossFns.keys()):
+                        losses[organ] = lossFns[organ](preds[i], targets[:, i].to(device))
+                    loss = torch.sum(losses.values())
+                    totalValLoss += loss
                 if args.vis_val:
                     visualize(imgs, preds, os.path.join(args.o, 'val_samples', 'seg_' + str(epoch+1)))
 
-            if total_val_loss < bestValLoss:
-                bestValLoss = total_val_loss
+            if totalValLoss < bestValLoss:
+                bestValLoss = totalValLoss
                 if args.early_stop_set == 'val': earlyStopCount = 0
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': loss,
+                    'loss': totalValLoss,
                     }, os.path.join(args.o, 'checkpoints', 'best_val.pt'))
-            logger.info(f"[{epoch + 1}] Epoch {epoch+1} | Validation loss: {total_val_loss / dataloaders['valSize']:.5f} | Time: {(time.time()-t):.1f} s")
+            logger.info(f"[{epoch + 1}] Epoch {epoch+1} | Validation loss: {totalValLoss / dataloaders['valSize']:.5f} | Time: {(time.time()-t):.1f} s")
         
         if args.early_stop_set != 'none' and earlyStopCount >= args.early_stop_epochs:
             logger.info("Stopping early") 
@@ -98,8 +106,8 @@ def train(args, model, dataloaders):
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Train segmentation model on images")
     datasetGroup = parser.add_argument_group("Dataset Info")
-    #datasetGroup.add_argument('datadir', type=str, help='Directory with images and ground truth segmentations')
-    datasetGroup.add_argument('--val', action='store_true', help="Whether to evaluate on a validation set")
+    datasetGroup.add_argument('--train-patients')
+    datasetGroup.add_argument('--val-patients')
 
     modelGroup = parser.add_argument_group("Model Parameters")
     modelGroup.add_argument('--arch', type=str, default='unet2d', help='unet2d, deeplabv3 (resnet50)')
@@ -134,8 +142,12 @@ if __name__=="__main__":
     # if args.vis_train: utils.makedir(os.path.join(args.o, 'train_samples')) 
     # if args.vis_val: utils.makedir(os.path.join(args.o, 'val_samples')) 
     
-    dataloaders = {'train': dataset.getDataloader(args.batch_size)}
-    model = models.UNet2D(32).to(device)
+    dataloaders = {
+        'train': dataset.getDataloader(args.batch_size, patientsPath=args.train_patients),
+        'val': dataset.getDataloader(args.batch_size, patientsPath=args.val_patients) if args.val_patients else None
+    }
+    #model = models.UNet2D(32).to(device)
+    model = models.UNet3D().to(device)
     
     # Initialize lazy layers
     dummyBatch = torch.ones((8, 32, 256, 256)).to(device)

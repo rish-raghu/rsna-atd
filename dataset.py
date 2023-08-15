@@ -14,10 +14,12 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 IMAGE_SIZE = 512
 
-def getDataloader(batch_size):
-    trainDataset = DicomDatasetSliceSampler('data/train.csv', 'data/train_series_meta.csv', 32, 0.5, 256)
-    logger.info("Dataset size: " + str(len(trainDataset)))
-    return DataLoader(trainDataset, batch_size=batch_size, shuffle=True)
+def getDataloader(batch_size, patientsPath=None, train=True):
+    labelPath = 'data/train.csv' if train else None
+    #dataset = DicomDatasetSliceSampler('data/train_series_meta.csv', 32, 0.5, 256, labelPath=labelPath)
+    dataset = DicomDataset3D('data/train_series_meta.csv', 128, 128, labelPath=labelPath, patientsPath=patientsPath)
+    logger.info(f"Using {len(dataset)} scans")
+    return DataLoader(dataset, batch_size=batch_size, shuffle=train)
 
 
 def _getLabel(labels, patient):
@@ -31,9 +33,16 @@ def _getLabel(labels, patient):
 
 
 class DicomDataset3D(Dataset):
-    def __init__(self, labelPath, metaPath):
-        self.labels = pd.read_csv(labelPath)
+    def __init__(self, metaPath, imageSize, zSize, labelPath=None, patientsPath=None):
+        self.labels = pd.read_csv(labelPath) if labelPath else None # for training
         self.meta = pd.read_csv(metaPath)
+        if patientsPath: 
+            with open(patientsPath, "r") as f:
+                patients = [int(patient.strip()) for patient in f]
+            self.labels = self.labels[self.labels['patient_id'].isin(patients)]
+            self.meta = self.meta[self.meta['patient_id'].isin(patients)]
+        self.imageSize = imageSize
+        self.zSize = zSize
 
     def __len__(self):
         return len(self.meta)
@@ -41,18 +50,29 @@ class DicomDataset3D(Dataset):
     def __getitem__(self, idx):
         patient, series = self.meta.iloc[idx][['patient_id', 'series_id']].astype(int)
         files = os.listdir('data/train_images/{}/{}'.format(patient, series))
-        data3d = torch.zeros((len(files), 512, 512))
+        data3d = torch.zeros((len(files), self.imageSize, self.imageSize))
         for i, file in enumerate(files):
             slice = pydicom.dcmread('data/train_images/{}/{}/{}'.format(patient, series, file)).pixel_array
-            data3d[i, ...] = transforms.CenterCrop(512)(torch.from_numpy(slice.astype(np.int32)))
-          
-        return data3d, _getLabel(self.labels, patient)
+            transform = transforms.Compose([transforms.CenterCrop((IMAGE_SIZE, IMAGE_SIZE)), transforms.Resize((self.imageSize, self.imageSize), antialias=True)])
+            data3d[i, ...] = transform(torch.from_numpy(slice.astype(np.int32)).unsqueeze(0))
+        data3d = torch.nn.functional.interpolate(data3d, size=(self.zSize, self.imageSize, self.imageSize))
+        data3d = data3d/torch.max(data3d)
+        
+        if self.labels: # for training
+            return data3d, torch.tensor(_getLabel(self.labels, patient))
+        else: # for evaluation
+            return data3d, torch.tensor([patient, series])
 
 
 class DicomDatasetSliceSampler(Dataset):
-    def __init__(self, labelPath, metaPath, numSamples, middleRange, imageSize):
-        self.labels = pd.read_csv(labelPath)
+    def __init__(self, metaPath, numSamples, middleRange, imageSize, patientsPath=None, idx=None):
+        self.labels = pd.read_csv(labelPath) if labelPath else None # for training
         self.meta = pd.read_csv(metaPath)
+        if patientsPath: 
+            with open(patientsPath, "r") as f:
+                patients = [int(patient.strip()) for patient in f]
+            self.labels = self.labels[self.labels['patient_id'].isin(patients)]
+            self.meta = self.meta[self.meta['patient_id'].isin(patients)]
         self.numSamples = numSamples
         self.middleRange = middleRange
         self.imageSize = imageSize
@@ -76,8 +96,11 @@ class DicomDatasetSliceSampler(Dataset):
             transform = transforms.Compose([transforms.CenterCrop((IMAGE_SIZE, IMAGE_SIZE)), transforms.Resize((self.imageSize, self.imageSize), antialias=True)])
             data3d[i, ...] = transform(torch.from_numpy(slice.astype(np.int32)).unsqueeze(0))
         data3d = data3d/torch.max(data3d)
-          
-        return data3d, torch.tensor(_getLabel(self.labels, patient))
+        
+        if self.labels: # for training
+            return data3d, torch.tensor(_getLabel(self.labels, patient))
+        else: # for evaluation
+            return data3d, torch.tensor([patient, series])
         
         
 
