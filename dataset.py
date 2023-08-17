@@ -5,22 +5,39 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
 import numpy as np
-from PIL import Image
 import pandas as pd
 import pydicom
+import cv2
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
-IMAGE_SIZE = 512
+CROP_SIZE = 512
+IMAGE_DIR = 'train_pngs'
 
-def getDataloader(batch_size, patientsPath=None, train=True):
-    labelPath = 'data/train.csv' if train else None
-    #dataset = DicomDatasetSliceSampler('data/train_series_meta.csv', 32, 0.5, 256, labelPath=labelPath)
-    dataset = DicomDataset3D('data/train_series_meta.csv', 128, 128, labelPath=labelPath, patientsPath=patientsPath)
-    logger.info(f"Using {len(dataset)} scans")
-    return DataLoader(dataset, batch_size=batch_size, shuffle=train)
+def getDataloader(args, set):
+    if set=='train':
+        labelPath = 'data/train.csv'
+        patientsPath = args.train_patients
+    elif set=='val':
+        labelPath = 'data/train.csv'
+        patientsPath = args.val_patients
+    elif set=='test':
+        labelPath = None
+        patientsPath = args.patients
+    
+    if args.dataset_type=='slice_sampler':
+        dataset = DicomDatasetSliceSampler('data/train_series_meta.csv', args.z_size, 0.5, args.image_size, labelPath=labelPath, patientsPath=patientsPath)
+    elif args.dataset_type=='volume':
+        dataset = DicomDataset3D('data/train_series_meta.csv', args.image_size, 128, labelPath=labelPath, patientsPath=patientsPath)
+    logger.info(f"{set} set: {len(dataset)} scans")
+    return DataLoader(dataset, batch_size=args.batch_size, shuffle=(set=='train'), num_workers=args.num_workers)
 
+def readImage(path):
+    if path.endswith('.png'):
+        return cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    else:
+        return pydicom.dcmread(path).pixel_array.astype(np.int32)
 
 def _getLabel(labels, patient):
     label = labels.loc[labels['patient_id'] == patient]
@@ -43,22 +60,29 @@ class DicomDataset3D(Dataset):
             self.meta = self.meta[self.meta['patient_id'].isin(patients)]
         self.imageSize = imageSize
         self.zSize = zSize
+        self.cache = torch.zeros((len(self.meta), self.zSize, self.imageSize, self.imageSize))
+        self.cacheHit = torch.zeros(len(self.meta))
 
     def __len__(self):
         return len(self.meta)
 
     def __getitem__(self, idx):
         patient, series = self.meta.iloc[idx][['patient_id', 'series_id']].astype(int)
-        files = os.listdir('data/train_images/{}/{}'.format(patient, series))
-        data3d = torch.zeros((len(files), self.imageSize, self.imageSize))
-        for i, file in enumerate(files):
-            slice = pydicom.dcmread('data/train_images/{}/{}/{}'.format(patient, series, file)).pixel_array
-            transform = transforms.Compose([transforms.CenterCrop((IMAGE_SIZE, IMAGE_SIZE)), transforms.Resize((self.imageSize, self.imageSize), antialias=True)])
-            data3d[i, ...] = transform(torch.from_numpy(slice.astype(np.int32)).unsqueeze(0))
-        data3d = torch.nn.functional.interpolate(data3d, size=(self.zSize, self.imageSize, self.imageSize))
-        data3d = data3d/torch.max(data3d)
+        if self.cacheHit[idx]:
+            data3d = self.cache[idx]
+        else:
+            files = os.listdir(f'data/{IMAGE_DIR}/{patient}/{series}')
+            data3d = torch.zeros((len(files), self.imageSize, self.imageSize))
+            for i, file in enumerate(files):
+                slice = readImage(f'data/{IMAGE_DIR}/{patient}/{series}/{file}')
+                transform = transforms.Compose([transforms.CenterCrop((CROP_SIZE, CROP_SIZE)), transforms.Resize((self.imageSize, self.imageSize), antialias=True)])
+                data3d[i, ...] = transform(torch.from_numpy(slice).unsqueeze(0))
+            data3d = torch.nn.functional.interpolate(data3d.unsqueeze(0).unsqueeze(0), size=(self.zSize, self.imageSize, self.imageSize))
+            data3d = data3d.squeeze()
+            self.cache[idx, ...] = data3d
+            self.cacheHit[idx] = 1
         
-        if self.labels: # for training
+        if self.labels is not None: # for training
             return data3d, torch.tensor(_getLabel(self.labels, patient))
         else: # for evaluation
             return data3d, torch.tensor([patient, series])
@@ -82,7 +106,7 @@ class DicomDatasetSliceSampler(Dataset):
 
     def __getitem__(self, idx):
         patient, series = self.meta.iloc[idx][['patient_id', 'series_id']].astype(int)
-        files = os.listdir('data/train_images/{}/{}'.format(patient, series))
+        files = os.listdir(f'data/{IMAGE_DIR}/{patient}/{series}')
         if int(self.middleRange * len(files)) >= self.numSamples:
             start = int(len(files)/2 - (self.middleRange/2 * len(files)))
             end = int(len(files)/2 + (self.middleRange/2 * len(files)))
@@ -92,12 +116,12 @@ class DicomDatasetSliceSampler(Dataset):
 
         data3d = torch.zeros((self.numSamples, self.imageSize, self.imageSize))
         for i, image_idx in enumerate(samples):
-            slice = pydicom.dcmread('data/train_images/{}/{}/{}'.format(patient, series, files[image_idx])).pixel_array
-            transform = transforms.Compose([transforms.CenterCrop((IMAGE_SIZE, IMAGE_SIZE)), transforms.Resize((self.imageSize, self.imageSize), antialias=True)])
-            data3d[i, ...] = transform(torch.from_numpy(slice.astype(np.int32)).unsqueeze(0))
+            slice = imageRead(f'data/{IMAGE_DIR}/{patient}/{series}/{files[image_idx]}')
+            transform = transforms.Compose([transforms.CenterCrop((CROP_SIZE, CROP_SIZE)), transforms.Resize((self.imageSize, self.imageSize), antialias=True)])
+            data3d[i, ...] = transform(torch.from_numpy(slice).unsqueeze(0))
         data3d = data3d/torch.max(data3d)
         
-        if self.labels: # for training
+        if self.labels is not None: # for training
             return data3d, torch.tensor(_getLabel(self.labels, patient))
         else: # for evaluation
             return data3d, torch.tensor([patient, series])

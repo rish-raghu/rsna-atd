@@ -4,6 +4,12 @@ from torch import nn
 import modules
 
 
+def get_model(args):
+    if args.arch=='unet2d':
+        return UNet2D(args.z_size)
+    elif args.arch=='unet3d':
+        return UNet3D
+
 
 class UNet2D(nn.Module):
     def __init__(self, inChannels, depth=5):
