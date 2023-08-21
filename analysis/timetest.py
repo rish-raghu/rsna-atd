@@ -25,3 +25,26 @@ t = time.time()
 for file in files:
     slice = numpy.asarray(Image.open("data/train_pngs/26009/6135/" + file).convert('L'))
 print("PIL time: ", time.time() - t)
+
+    # iterator = iter(dataloaders['train'])
+    # t1 = time.time()
+    # batch1 = next(iterator)
+    # print("Batch 1 time ", time.time() - t1)
+    # t1 = time.time()
+    # model(batch1[0].to(device))
+    # print("Inf 1 time ", time.time() - t1)
+    # t1 = time.time()
+    # batch2 = next(iterator)
+    # print("Batch 2 time ", time.time() - t1)
+    # t1 = time.time()
+    # model(batch2[0].to(device))
+    # print("Inf 2 time ", time.time() - t1)
+    # assert False
+
+    # t1 = time.time()
+    # batch1 = dataloaders['train'].dataset[0]
+    # print("Batch 1 time ", time.time() - t1)
+    # t1 = time.time()
+    # batch1 = dataloaders['train'].dataset[0]
+    # print("Batch 1 time ", time.time() - t1)
+    # assert False

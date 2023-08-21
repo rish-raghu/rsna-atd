@@ -4,15 +4,16 @@ import logging
 import time
 
 import torch
-from torch import nn
 import torch.nn.functional as F
 import numpy as np
 import wandb
+import json
 
 import models
 import dataset
 import utils
 import metrics
+import evaluate
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -29,11 +30,11 @@ def __addAccuracies(split, epochMetrics, organ, labelAccs):
 def train(args, model, dataloaders):
     optimizer = torch.optim.Adagrad(model.parameters(), lr=args.lr)
     lossFns = {
-        'bowel': nn.NLLLoss(weight=torch.Tensor([1, 2]).to(device)),
-        'extravasation': nn.NLLLoss(weight=torch.Tensor([1, 6]).to(device)),
-        'liver': nn.NLLLoss(weight=torch.Tensor([1, 2, 4]).to(device)),
-        'kidney': nn.NLLLoss(weight=torch.Tensor([1, 2, 4]).to(device)),
-        'spleen': nn.NLLLoss(weight=torch.Tensor([1, 2, 4]).to(device))
+        'bowel': torch.nn.NLLLoss(weight=torch.Tensor([1, 2]).to(device)),
+        'extravasation': torch.nn.NLLLoss(weight=torch.Tensor([1, 6]).to(device)),
+        'liver': torch.nn.NLLLoss(weight=torch.Tensor([1, 2, 4]).to(device)),
+        'kidney': torch.nn.NLLLoss(weight=torch.Tensor([1, 2, 4]).to(device)),
+        'spleen': torch.nn.NLLLoss(weight=torch.Tensor([1, 2, 4]).to(device))
     }
     bestTrainLoss = float('inf')
     bestValLoss = float('inf')
@@ -62,7 +63,6 @@ def train(args, model, dataloaders):
             
             if epoch==0: logger.info("[{}] ".format(epoch+1) + "Batch loss = " + str(loss.item()))
             totalTrainLoss += loss.item()
-            if i==2: break
         
         # Training loss and best model checkpointing
         earlyStopCount += 1
@@ -108,7 +108,6 @@ def train(args, model, dataloaders):
                         labelAccs = metrics.label_wise_accuracy(organPreds, organTargets)
                         __addAccuracies('val', epochMetrics, organ, labelAccs)
                     totalValLoss += loss.item()
-                    if i==2: break
 
             if totalValLoss < bestValLoss:
                 bestValLoss = totalValLoss
@@ -144,7 +143,7 @@ if __name__=="__main__":
     datasetGroup.add_argument('--z-size', type=int, default=32, help='Number of slices for a slice_sampler, or z-dimension for downsampled volume')
     datasetGroup.add_argument('--train-patients')
     datasetGroup.add_argument('--val-patients')
-    datasetGroup.add_argument('--num-workers', type=int, default=1)
+    datasetGroup.add_argument('--num-workers', type=int, default=0)
 
     modelGroup = parser.add_argument_group("Model Parameters")
     modelGroup.add_argument('--arch', type=str, default='unet2d', help='unet2d, unet3d')
@@ -170,8 +169,11 @@ if __name__=="__main__":
     args = parser.parse_args()
     logger.info(args)
 
+    args = utils.dotdict(vars(args))
     utils.makedir(args.o)
-    utils.makedir(os.path.join(args.o, 'checkpoints')) 
+    utils.makedir(os.path.join(args.o, 'checkpoints'))
+    with open(os.path.join(args.o, 'config.json'), 'w') as f:
+        json.dump(args, f) 
 
     if not args.debug: 
         os.environ['WANDB_MODE'] = "offline"
@@ -182,11 +184,9 @@ if __name__=="__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     dataloaders = {
-        'train': dataset.getDataloader(args, 'train'),
-        'val': dataset.getDataloader(args, 'val') if args.val_patients else None
+        'train': dataset.getDataloader(args, 'train', patients=args.train_patients),
+        'val': dataset.getDataloader(args, 'val', patients=args.val_patients) if args.val_patients else None
     }
-
-    
 
     model = models.get_model(args).to(device)
     
@@ -194,30 +194,13 @@ if __name__=="__main__":
     dummyBatch = torch.ones((args.batch_size, args.z_size, args.image_size, args.image_size)).to(device)
     model(dummyBatch)
 
-    # iterator = iter(dataloaders['train'])
-    # t1 = time.time()
-    # batch1 = next(iterator)
-    # print("Batch 1 time ", time.time() - t1)
-    # t1 = time.time()
-    # model(batch1[0].to(device))
-    # print("Inf 1 time ", time.time() - t1)
-    # t1 = time.time()
-    # batch2 = next(iterator)
-    # print("Batch 2 time ", time.time() - t1)
-    # t1 = time.time()
-    # model(batch2[0].to(device))
-    # print("Inf 2 time ", time.time() - t1)
-    # assert False
-
-    # t1 = time.time()
-    # batch1 = dataloaders['train'].dataset[0]
-    # print("Batch 1 time ", time.time() - t1)
-    # t1 = time.time()
-    # batch1 = dataloaders['train'].dataset[0]
-    # print("Batch 1 time ", time.time() - t1)
-    # assert False
-
     numParams = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info("Number of model parameters: " + str(numParams))
     train(args, model, dataloaders)
-    logger.info(f"Total Time: {(time.time()-start):.0f} s")
+    logger.info(f"Total Training Time: {(time.time()-start):.0f} s")
+
+    if args.val_patients:
+        logger.info("Evaluating...")
+        preds = evaluate.evaluate(model, dataloaders['val'])
+        preds = pd.DataFrame(preds.cpu().numpy(), columns=evaluate.OUTPUT_COLUMNS)
+        preds.to_csv(os.path.join(args.o, 'preds.csv'), index=False)

@@ -8,7 +8,7 @@ def get_model(args):
     if args.arch=='unet2d':
         return UNet2D(args.z_size)
     elif args.arch=='unet3d':
-        return UNet3D
+        return UNet3D()
 
 
 class UNet2D(nn.Module):
@@ -60,8 +60,8 @@ class UNet3D(nn.Module):
     def __init__(self, depth=5):
         super(UNet3D, self).__init__()
         
-        channels = 64
-        self.downLayers = nn.ModuleList([modules.DownConv3D(1, 64)])
+        channels = 32
+        self.downLayers = nn.ModuleList([modules.DownConv3D(1, 32)])
         for _ in range(depth-1):
             self.downLayers.append(modules.DownConv3D(channels, 2*channels))
             channels *= 2

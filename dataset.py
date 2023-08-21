@@ -15,23 +15,14 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 CROP_SIZE = 512
 IMAGE_DIR = 'train_pngs'
 
-def getDataloader(args, set):
-    if set=='train':
-        labelPath = 'data/train.csv'
-        patientsPath = args.train_patients
-    elif set=='val':
-        labelPath = 'data/train.csv'
-        patientsPath = args.val_patients
-    elif set=='test':
-        labelPath = None
-        patientsPath = args.patients
-    
+def getDataloader(args, split, patients=None):
+    labelPath = 'data/train.csv' if split in ['train', 'val'] else None    
     if args.dataset_type=='slice_sampler':
-        dataset = DicomDatasetSliceSampler('data/train_series_meta.csv', args.z_size, 0.5, args.image_size, labelPath=labelPath, patientsPath=patientsPath)
+        dataset = DicomDatasetSliceSampler('data/train_series_meta.csv', args.z_size, 0.5, args.image_size, labelPath=labelPath, patientsPath=patients)
     elif args.dataset_type=='volume':
-        dataset = DicomDataset3D('data/train_series_meta.csv', args.image_size, 128, labelPath=labelPath, patientsPath=patientsPath)
-    logger.info(f"{set} set: {len(dataset)} scans")
-    return DataLoader(dataset, batch_size=args.batch_size, shuffle=(set=='train'), num_workers=args.num_workers)
+        dataset = DicomDataset3D('data/train_series_meta.csv', args.image_size, args.z_size, labelPath=labelPath, patientsPath=patients)
+    logger.info(f"{split} split: {len(dataset)} scans")
+    return DataLoader(dataset, batch_size=args.batch_size, shuffle=(split=='train'), num_workers=args.num_workers)
 
 def readImage(path):
     if path.endswith('.png'):
@@ -56,12 +47,13 @@ class DicomDataset3D(Dataset):
         if patientsPath: 
             with open(patientsPath, "r") as f:
                 patients = [int(patient.strip()) for patient in f]
-            self.labels = self.labels[self.labels['patient_id'].isin(patients)]
+            if self.labels: self.labels = self.labels[self.labels['patient_id'].isin(patients)]
             self.meta = self.meta[self.meta['patient_id'].isin(patients)]
         self.imageSize = imageSize
         self.zSize = zSize
         self.cache = torch.zeros((len(self.meta), self.zSize, self.imageSize, self.imageSize))
         self.cacheHit = torch.zeros(len(self.meta))
+
 
     def __len__(self):
         return len(self.meta)
