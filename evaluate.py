@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import json
 
-import models
+from models.utils import get_model
 import dataset
 import utils
 
@@ -25,7 +25,7 @@ OUTPUT_COLUMNS = [
 ]
 
 def evaluate(model, dataloader):
-    preds = torch.zeros((len(dataloader.dataset), len(OUTPUT_COLUMNS))).to(device)
+    preds = torch.zeros((len(dataloader.dataset), len(OUTPUT_COLUMNS)))
     b = dataloader.batch_size
 
     model.eval()
@@ -34,12 +34,12 @@ def evaluate(model, dataloader):
             imgs, ids = data[0].to(device), data[1].to(device)
             probs = model(imgs)
             
-            preds[i*b:(i+1)*b, 0:2] = ids
-            preds[i*b:(i+1)*b, 2:4] = torch.nn.functional.softmax(probs[0], dim=1)
-            preds[i*b:(i+1)*b, 4:6] = torch.nn.functional.softmax(probs[1], dim=1)
-            preds[i*b:(i+1)*b, 6:9] = torch.nn.functional.softmax(probs[2], dim=1)
-            preds[i*b:(i+1)*b, 9:12] = torch.nn.functional.softmax(probs[3], dim=1)
-            preds[i*b:(i+1)*b, 12:15] = torch.nn.functional.softmax(probs[4], dim=1)
+            preds[i*b:(i+1)*b, 0:2] = ids.cpu()
+            preds[i*b:(i+1)*b, 2:4] = torch.nn.functional.softmax(probs[0], dim=1).cpu()
+            preds[i*b:(i+1)*b, 4:6] = torch.nn.functional.softmax(probs[1], dim=1).cpu()
+            preds[i*b:(i+1)*b, 6:9] = torch.nn.functional.softmax(probs[2], dim=1).cpu()
+            preds[i*b:(i+1)*b, 9:12] = torch.nn.functional.softmax(probs[3], dim=1).cpu()
+            preds[i*b:(i+1)*b, 12:15] = torch.nn.functional.softmax(probs[4], dim=1).cpu()
             
             logger.info("Done with {} scans".format((i+1)*b))
 
@@ -66,7 +66,7 @@ if __name__=="__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
     dataloader = dataset.getDataloader(args, 'test', patients=args.patients)
-    model = models.get_model(args).to(device)
+    model = get_model(args).to(device)
     checkpoint = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     logger.info("Loaded weights from epoch {} of {}".format(checkpoint['epoch']+1, args.checkpoint))

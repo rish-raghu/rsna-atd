@@ -9,7 +9,7 @@ import numpy as np
 import wandb
 import json
 
-import models
+from models.utils import get_model
 import dataset
 import utils
 import metrics
@@ -28,7 +28,8 @@ def __addAccuracies(split, epochMetrics, organ, labelAccs):
 
 
 def train(args, model, dataloaders):
-    optimizer = torch.optim.Adagrad(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer.zero_grad()
     lossFns = {
         'bowel': torch.nn.NLLLoss(weight=torch.Tensor([1, 2]).to(device)),
         'extravasation': torch.nn.NLLLoss(weight=torch.Tensor([1, 6]).to(device)),
@@ -48,7 +49,6 @@ def train(args, model, dataloaders):
         
         for i, data in enumerate(dataloaders['train']):
             imgs, targets = data[0].to(device), data[1].to(device)
-            optimizer.zero_grad()
             preds = model(imgs)
             loss = 0
             for j, organ in enumerate(lossFns.keys()):
@@ -59,7 +59,10 @@ def train(args, model, dataloaders):
                 labelAccs = metrics.label_wise_accuracy(organPreds, organTargets)
                 __addAccuracies('train', epochMetrics, organ, labelAccs)
             loss.backward()
-            optimizer.step()
+
+            if (i+1)%args.grad_accum_steps==0:
+                optimizer.step()
+                optimizer.zero_grad()
             
             if epoch==0: logger.info("[{}] ".format(epoch+1) + "Batch loss = " + str(loss.item()))
             totalTrainLoss += loss.item()
@@ -99,7 +102,7 @@ def train(args, model, dataloaders):
                 for i, data in enumerate(dataloaders['val']):
                     imgs, targets = data[0].to(device), data[1].to(device)
                     preds = model(imgs)
-                    losses = {}
+                    loss = 0
                     for j, organ in enumerate(lossFns.keys()):
                         organPreds, organTargets = preds[j], targets[:, j].to(device)
                         organLoss = lossFns[organ](F.log_softmax(organPreds, dim=1), organTargets)
@@ -138,15 +141,15 @@ def train(args, model, dataloaders):
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Train segmentation model on images")
     datasetGroup = parser.add_argument_group("Dataset Info")
-    datasetGroup.add_argument('--dataset-type', default='volume', help='volume, slice_sampler')
+    datasetGroup.add_argument('--dataset-type', default='3d', choices=['3d', '2d', '2dsampled'])
     datasetGroup.add_argument('--image-size', type=int, default=512)
-    datasetGroup.add_argument('--z-size', type=int, default=32, help='Number of slices for a slice_sampler, or z-dimension for downsampled volume')
+    datasetGroup.add_argument('--z-size', type=int, default=-1, help='Number of slices for a slice_sampler, or z-dimension for downsampled volume (-1 for all)')
     datasetGroup.add_argument('--train-patients')
     datasetGroup.add_argument('--val-patients')
     datasetGroup.add_argument('--num-workers', type=int, default=0)
 
     modelGroup = parser.add_argument_group("Model Parameters")
-    modelGroup.add_argument('--arch', type=str, default='unet2d', help='unet2d, unet3d')
+    modelGroup.add_argument('--arch', type=str, default='unet2d', choices=['unet2d', 'unet3d', 'densenet121', 'densenet169', 'densenet201', 'densenet264'])
     #modelGroup.add_argument('--depth', type=int, default=5, help="Number of blocks in reducing path")
 
     trainGroup = parser.add_argument_group("Training Parameters")
@@ -156,8 +159,10 @@ if __name__=="__main__":
     trainGroup.add_argument('--val-freq', type=int, default=1, help="How often to evaluate validation set, if validation is enabled")
     trainGroup.add_argument('--early-stop-set', type=str, default='none', help="Which dataset to monitor loss on for early stopping. Can be 'train', 'val', or 'none'")
     trainGroup.add_argument('--early-stop-epochs', type=int, default=5, help="Number of epochs of no loss improvement before stopping")
-    trainGroup.add_argument('--lr', type=float, default=0.01, help="Learning rate")
+    trainGroup.add_argument('--lr', type=float, default=0.001, help="Learning rate")
     trainGroup.add_argument('--batch-size', type=int, default=8, help="Number of images per batch")
+    trainGroup.add_argument('--batch-norm', action='store_false', help="Whether to enable batch normalization (default: false)")
+    trainGroup.add_argument('--grad-accum-steps', type=int, default=1, help='How many batches to process before updating model')
 
     outGroup = parser.add_argument_group("Output Info")
     outGroup.add_argument('-o', required=True, help="Output directory")
@@ -188,19 +193,26 @@ if __name__=="__main__":
         'val': dataset.getDataloader(args, 'val', patients=args.val_patients) if args.val_patients else None
     }
 
-    model = models.get_model(args).to(device)
-    
+    model = get_model(args).to(device)
+
     # Initialize lazy layers
-    dummyBatch = torch.ones((args.batch_size, args.z_size, args.image_size, args.image_size)).to(device)
-    model(dummyBatch)
+    if args.arch=='unet2d':
+        dummyBatch = torch.ones((args.batch_size, args.z_size, args.image_size, args.image_size)).to(device)
+        model(dummyBatch)
 
     numParams = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info("Number of model parameters: " + str(numParams))
     train(args, model, dataloaders)
     logger.info(f"Total Training Time: {(time.time()-start):.0f} s")
 
+    if args.train_patients:
+        logger.info("Evaluating training set...")
+        preds = evaluate.evaluate(model, dataloaders['train'])
+        preds = pd.DataFrame(preds.cpu().numpy(), columns=evaluate.OUTPUT_COLUMNS)
+        preds.to_csv(os.path.join(args.o, 'preds.train.csv'), index=False)
+
     if args.val_patients:
-        logger.info("Evaluating...")
+        logger.info("Evaluating validation set...")
         preds = evaluate.evaluate(model, dataloaders['val'])
         preds = pd.DataFrame(preds.cpu().numpy(), columns=evaluate.OUTPUT_COLUMNS)
-        preds.to_csv(os.path.join(args.o, 'preds.csv'), index=False)
+        preds.to_csv(os.path.join(args.o, 'preds.val.csv'), index=False)

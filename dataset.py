@@ -13,14 +13,15 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 CROP_SIZE = 512
+MAX_Z = 500
 IMAGE_DIR = 'train_pngs'
 
 def getDataloader(args, split, patients=None):
     labelPath = 'data/train.csv' if split in ['train', 'val'] else None    
-    if args.dataset_type=='slice_sampler':
+    if args.dataset_type=='2dsampled':
         dataset = DicomDatasetSliceSampler('data/train_series_meta.csv', args.z_size, 0.5, args.image_size, labelPath=labelPath, patientsPath=patients)
-    elif args.dataset_type=='volume':
-        dataset = DicomDataset3D('data/train_series_meta.csv', args.image_size, args.z_size, labelPath=labelPath, patientsPath=patients)
+    elif args.dataset_type in ['2d', '3d']:
+        dataset = DicomDataset3D('data/train_series_meta.csv', args.dataset_type, args.image_size, args.z_size, labelPath=labelPath, patientsPath=patients)
     logger.info(f"{split} split: {len(dataset)} scans")
     return DataLoader(dataset, batch_size=args.batch_size, shuffle=(split=='train'), num_workers=args.num_workers)
 
@@ -41,18 +42,20 @@ def _getLabel(labels, patient):
 
 
 class DicomDataset3D(Dataset):
-    def __init__(self, metaPath, imageSize, zSize, labelPath=None, patientsPath=None):
+    def __init__(self, metaPath, datasetType, imageSize, zSize, labelPath=None, patientsPath=None):
         self.labels = pd.read_csv(labelPath) if labelPath else None # for training
         self.meta = pd.read_csv(metaPath)
         if patientsPath: 
             with open(patientsPath, "r") as f:
                 patients = [int(patient.strip()) for patient in f]
-            if self.labels: self.labels = self.labels[self.labels['patient_id'].isin(patients)]
+            if self.labels is not None: self.labels = self.labels[self.labels['patient_id'].isin(patients)]
             self.meta = self.meta[self.meta['patient_id'].isin(patients)]
         self.imageSize = imageSize
         self.zSize = zSize
-        self.cache = torch.zeros((len(self.meta), self.zSize, self.imageSize, self.imageSize))
+        #self.cache = torch.zeros((len(self.meta), self.zSize, self.imageSize, self.imageSize))
+        self.cache = [None] * len(self.meta)
         self.cacheHit = torch.zeros(len(self.meta))
+        self.datasetType = datasetType
 
 
     def __len__(self):
@@ -60,6 +63,7 @@ class DicomDataset3D(Dataset):
 
     def __getitem__(self, idx):
         patient, series = self.meta.iloc[idx][['patient_id', 'series_id']].astype(int)
+        #print(f"PT {patient} S {series}", flush=True)
         if self.cacheHit[idx]:
             data3d = self.cache[idx]
         else:
@@ -69,9 +73,15 @@ class DicomDataset3D(Dataset):
                 slice = readImage(f'data/{IMAGE_DIR}/{patient}/{series}/{file}')
                 transform = transforms.Compose([transforms.CenterCrop((CROP_SIZE, CROP_SIZE)), transforms.Resize((self.imageSize, self.imageSize), antialias=True)])
                 data3d[i, ...] = transform(torch.from_numpy(slice).unsqueeze(0))
-            data3d = torch.nn.functional.interpolate(data3d.unsqueeze(0).unsqueeze(0), size=(self.zSize, self.imageSize, self.imageSize))
-            data3d = data3d.squeeze()
-            self.cache[idx, ...] = data3d
+            if self.zSize != -1: 
+                data3d = torch.nn.functional.interpolate(data3d.unsqueeze(0).unsqueeze(0), size=(self.zSize, self.imageSize, self.imageSize))
+                data3d = data3d.squeeze() if self.datasetType == '2d' else data3d.squeeze(0)
+            elif len(files) > MAX_Z:
+                data3d = torch.nn.functional.interpolate(data3d.unsqueeze(0).unsqueeze(0), size=(MAX_Z, self.imageSize, self.imageSize))
+                data3d = data3d.squeeze() if self.datasetType == '2d' else data3d.squeeze(0)
+            elif self.datasetType == '3d':
+                data3d = data3d.unsqueeze(0)
+            self.cache[idx] = data3d
             self.cacheHit[idx] = 1
         
         if self.labels is not None: # for training

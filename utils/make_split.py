@@ -5,10 +5,14 @@ import numpy as np
 parser = argparse.ArgumentParser(description="Generate train/val split")
 parser.add_argument('val_frac', type=float)
 parser.add_argument('split_name')
+parser.add_argument('--injured', action='store_true')
 parser.add_argument('--seed', type=int, default=None)
 args = parser.parse_args()
 
-patients = np.array(pd.read_csv("data/train.csv")["patient_id"])
+df = pd.read_csv("data/train.csv")
+if args.injured:
+    df = df[df["any_injury"]==1]
+patients = np.array(df["patient_id"])
 if args.seed: np.random.seed(args.seed)
 np.random.shuffle(patients)
 num_val = int(len(patients)*args.val_frac)
