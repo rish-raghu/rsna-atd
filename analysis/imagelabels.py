@@ -15,7 +15,7 @@ for patient, series in list(zip(countsBySeries['patient_id'], countsBySeries['se
 print("Total number of slices for these series: ", count)
 
 count = 0
-for patient in countsBySeries['patient_id'].unique():
+for patient in df['patient_id'].unique():
     for series in os.listdir(f"data/train_pngs/{patient}"):
         count += len(os.listdir(f"data/train_pngs/{patient}/{series}"))
 print("Total number of slices for these patients: ", count)

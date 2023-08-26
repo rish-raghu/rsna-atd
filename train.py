@@ -52,7 +52,7 @@ def train(args, model, dataloaders):
             preds = model(imgs)
             loss = 0
             for j, organ in enumerate(lossFns.keys()):
-                organPreds, organTargets = preds[j], targets[:, j].to(device)
+                organPreds, organTargets = preds[j], targets[:, j]
                 organLoss = lossFns[organ](F.log_softmax(organPreds, dim=1), organTargets)
                 epochMetrics[f"train_loss_{organ}"] = epochMetrics.get(f"train_loss_{organ}", 0) + organLoss.item()
                 loss += organLoss
@@ -89,7 +89,7 @@ def train(args, model, dataloaders):
                 }, os.path.join(args.o, 'checkpoints', 'latest.pt'))
 
         for met in epochMetrics.keys():
-            epochMetrics[met] /= len(dataloaders['train'].dataset)
+            epochMetrics[met] /= len(dataloaders['train'].dataset) # TODO: wrong denom for losses?
         epochMetrics['train_loss'] = totalTrainLoss / len(dataloaders['train'].dataset)
         epochMetrics['train_time'] = time.time()-t
         #logger.info(f"[{epoch + 1}] Epoch {epoch+1} | Train loss: {epochMetrics['train_loss']:.5f} | Time: {(epochMetrics['train_time']):.1f} s")
